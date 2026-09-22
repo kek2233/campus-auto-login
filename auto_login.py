@@ -13,9 +13,8 @@ def get_all_wifi():
     try:
         out = subprocess.run(
             ["netsh", "wlan", "show", "networks", "mode=bssid"],
-            capture_output=True, text=True, encoding="gbk", errors="ignore",
-            timeout=10, creationflags=NO_WINDOW
-        ).stdout
+            capture_output=True, timeout=10, creationflags=NO_WINDOW
+        ).stdout.decode("utf-8", errors="ignore")
     except Exception:
         return []
 
@@ -33,7 +32,8 @@ def get_all_wifi():
             current_ssid = m.group(1).strip()
             current_signal = 0
             continue
-        m = re.match(r"^Signal\s*:\s*(\d+)%", line)
+        # 兼容中英文 Signal / 信号
+        m = re.match(r"^(?:Signal|信号)\s*:\s*(\d+)%", line)
         if m and current_ssid:
             current_signal = int(m.group(1))
 
