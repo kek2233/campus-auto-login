@@ -1,11 +1,21 @@
 # -*- coding: utf-8 -*-
-"""校园网自动连接 - 纯后台静默版，自动切换WiFi+自动认证，连上自动退出"""
-import os, sys, time, subprocess, re
+"""校园网自动连接 - 后台常驻版，持续监控，掉线自动重连"""
+import os, sys, time, subprocess, re, json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import campus as core
 
 NO_WINDOW = 0x08000000
+APP_DIR = core.APP_DIR
+CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def get_all_wifi():
@@ -24,7 +34,6 @@ def get_all_wifi():
 
     for line in out.splitlines():
         line = line.strip()
-        # 遇到新的SSID行，保存上一个
         m = re.match(r"^SSID\s+\d+\s*:\s*(.+)", line)
         if m and not line.startswith("BSSID"):
             if current_ssid and current_signal > 0:
@@ -32,16 +41,13 @@ def get_all_wifi():
             current_ssid = m.group(1).strip()
             current_signal = 0
             continue
-        # 兼容中英文 Signal / 信号
         m = re.match(r"^(?:Signal|信号)\s*:\s*(\d+)%", line)
         if m and current_ssid:
             current_signal = int(m.group(1))
 
-    # 保存最后一个
     if current_ssid and current_signal > 0:
         networks.append((current_ssid, current_signal))
 
-    # 只保留校园WiFi（CU_开头），按信号从高到低排序
     campus_wifi = [(s, sig) for s, sig in networks if s.startswith("CU_")]
     campus_wifi.sort(key=lambda x: x[1], reverse=True)
     return campus_wifi
@@ -61,40 +67,81 @@ def connect_wifi(ssid):
 
 
 def main():
-    # 先检查是否已在线
-    if core.is_online():
-        return  # 已在线，直接退出
+    print("校园网自动连接后台服务已启动")
+    check_interval = 30  # 每30秒检测一次
 
-    # 读取配置
-    cfg = core.load_config()
-    if not cfg.get("username") or not cfg.get("password"):
-        return  # 没配置账号，直接退出
+    while True:
+        try:
+            # 读取配置
+            cfg = load_config()
+            if not cfg.get("username") or not cfg.get("password"):
+                print("未配置账号，等待配置...")
+                time.sleep(60)
+                continue
 
-    # 获取所有校园WiFi
-    wifi_list = get_all_wifi()
-    if not wifi_list:
-        return  # 没找到校园WiFi
+            # 检查是否在线
+            if core.is_online():
+                print(time.strftime("%H:%M:%S"), "已在线，正常运行")
+                time.sleep(check_interval)
+                continue
 
-    # 逐个尝试连接
-    for ssid, signal in wifi_list[:5]:  # 试前5个信号最好的
-        # 连接WiFi
-        if not connect_wifi(ssid):
-            continue
+            print(time.strftime("%H:%M:%S"), "检测到未联网，开始自动连接...")
 
-        # 等一下获取IP
-        time.sleep(3)
+            # 获取所有校园WiFi
+            wifi_list = get_all_wifi()
+            if not wifi_list:
+                print("没找到校园WiFi，重试...")
+                time.sleep(10)
+                continue
 
-        # 尝试认证
-        for retry in range(2):
-            try:
-                ok = core.try_login(cfg)
-                if ok and core.is_online():
-                    return  # 成功，退出
-            except Exception:
-                pass
-            time.sleep(2)
+            # 先试当前WiFi，不行再切换
+            current_ssid = core.current_ssid()
+            if current_ssid.startswith("CU_"):
+                # 当前已经是校园WiFi，直接尝试认证
+                print(f"当前WiFi: {current_ssid}，尝试认证...")
+                for retry in range(3):
+                    try:
+                        ok = core.try_login(cfg)
+                        if ok and core.is_online():
+                            print("认证成功！")
+                            break
+                    except Exception as e:
+                        print(f"认证失败: {e}")
+                    time.sleep(3)
 
-    # 所有WiFi都试完了还没连上，退出
+                if core.is_online():
+                    time.sleep(check_interval)
+                    continue
+
+            # 当前WiFi不行，切换到信号最好的
+            print("切换到信号最好的WiFi...")
+            for ssid, signal in wifi_list[:3]:
+                print(f"尝试连接 {ssid} (信号{signal}%)...")
+                if not connect_wifi(ssid):
+                    print(f"连接 {ssid} 失败")
+                    continue
+
+                # 连接成功，尝试认证
+                print(f"已连接 {ssid}，开始认证...")
+                time.sleep(3)
+                for retry in range(3):
+                    try:
+                        ok = core.try_login(cfg)
+                        if ok and core.is_online():
+                            print("认证成功！")
+                            break
+                    except Exception as e:
+                        print(f"认证失败: {e}")
+                    time.sleep(3)
+
+                if core.is_online():
+                    break
+
+            time.sleep(check_interval)
+
+        except Exception as e:
+            print(f"出错: {e}")
+            time.sleep(10)
 
 
 if __name__ == "__main__":
